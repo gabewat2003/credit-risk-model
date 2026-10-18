@@ -1,4 +1,4 @@
-.PHONY: help data features train evaluate cutoff pricing sensitivity fairness test clean all
+.PHONY: help data features train evaluate cutoff pricing elasticity sensitivity fairness test clean all
 
 PY := uv run python -m
 
@@ -10,6 +10,7 @@ help:
 	@echo "  make evaluate  - Metrics table, decile table, calibration plot"
 	@echo "  make cutoff    - Expected-profit sweep + cutoff.png"
 	@echo "  make pricing   - Decile break-even APR table + pricing.png"
+	@echo "  make elasticity - Pricing uplift under demand elasticity"
 	@echo "  make sensitivity - LGD sweep over cutoff + pricing"
 	@echo "  make fairness  - Disparate-impact audit across protected proxies"
 	@echo "  make test      - Run pytest"
@@ -34,6 +35,9 @@ cutoff:
 pricing:
 	$(PY) src.pricing
 
+elasticity:
+	$(PY) src.elasticity
+
 sensitivity:
 	$(PY) src.sensitivity
 
@@ -43,7 +47,7 @@ fairness:
 test:
 	uv run pytest
 
-all: data features train evaluate cutoff pricing sensitivity fairness
+all: data features train evaluate cutoff pricing elasticity sensitivity fairness
 
 clean:
 	rm -f reports/*.png reports/*.csv reports/*.parquet reports/*.joblib reports/*.md

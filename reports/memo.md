@@ -17,7 +17,7 @@ Calibrated LightGBM on 319k test loans: AUC 0.669, KS 0.244, Brier 0.164, **6.4�
 
 Declining the riskiest 14% of applicants adds $20M to realized portfolio profit on the test window.
 
-## Decision 2: Risk-based pricing
+## Decision 2: Risk-based pricing with demand elasticity
 
 Per-decile break-even APR vs what LendingClub actually charged:
 
@@ -28,7 +28,19 @@ Per-decile break-even APR vs what LendingClub actually charged:
 | 9 | 33.5% | 17.3% | 17.0% |
 | 10 | 42.8% | 20.0% | 22.1% |
 
-**Structural finding:** LendingClub's own APR curve tracks default rate roughly 1-for-1, leaving ~zero margin before LGD. Once a flat 85% LGD is applied, their actual pricing sits below break-even from decile 9 onward. Repricing each decile at `break_even_apr + 3%` lifts simulated realized profit from $52.9M to $264.0M on the same accepted population — directional, not a forecast, since it holds applicant behavior constant.
+**Structural finding:** LendingClub's own APR curve tracks default rate roughly 1-for-1, leaving ~zero margin before LGD. Once a flat 85% LGD is applied, their actual pricing sits below break-even from decile 9 onward.
+
+Applying a `break_even_apr + 3%` policy, with a constant-elasticity demand curve capped at the observed pool (so lowering a rate can't recruit new borrowers):
+
+| β | Volume retained | Elastic profit | Uplift vs LC actual |
+| ---: | ---: | ---: | ---: |
+| 0 (no churn upper bound) | 100% | $266.1M | +$213.1M |
+| −2 | 77.5% | $192.0M | +$139.0M |
+| **−4 (headline, lit midpoint)** | **62.6%** | **$143.5M** | **+$90.6M** |
+| −6 | 52.6% | $111.5M | +$58.5M |
+| −8 | 45.8% | $90.1M | +$37.2M |
+
+Policy stays 2–4× over LC baseline across the full elasticity range.
 
 ## Caveats
 
@@ -53,4 +65,4 @@ Four-fifths-rule disparate-impact ratios across three proxies at the operating c
 
 ## Follow-ups
 
-Model borrower APR elasticity to translate the pricing policy into a realistic revenue forecast. Replace the flat LGD with a conditional model fit on the recoveries column. Add a reject-inference study using LendingClub's declined-applicants file (if obtainable).
+Model **adverse selection** inside the retained-after-churn pool (borrowers who walk at a higher APR are likely the lowest-risk ones; the ones who stay default more). Replace the flat LGD with a conditional model fit on the recoveries column. Add a reject-inference study using LendingClub's declined-applicants file (if obtainable).
