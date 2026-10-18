@@ -2,20 +2,27 @@
 
 A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)** paired with an expected-profit decision layer that turns the model into an actual approve/decline rule. Trained on borrower attributes only — grade, sub-grade, and the lender's own interest rate are deliberately excluded, so the model competes against LendingClub's underwriting rather than copying it.
 
+**Headline result on 319k held-out test loans (2016-07+):**
+
+| Policy | Approval rate | Default rate | Realized profit |
+| --- | ---: | ---: | ---: |
+| Approve everyone | 100% | 20.1% | $52.9M |
+| **Model cutoff (PD ≤ 35.4%)** | **86.4%** | **19.6%** | **$73.0M (+38%)** |
+
+The model declines the riskiest ~14% of applicants and lifts realized portfolio profit by **$20M** over a blanket-approve policy, with a **6.4× decile lift** (decile-1 default 6.8% vs decile-10 43.5%) driving the discriminatory power. AUC on the calibrated model is 0.670.
+
+![cutoff](reports/cutoff.png)
+![calibration](reports/calibration.png)
+
 **Stack:** PostgreSQL · psycopg3 (COPY-based bulk load) · scikit-learn · LightGBM · matplotlib · pytest · Docker
 
-**Headline numbers (test set, 2016-07+):**
+**Model metrics:**
 
 | Model | AUC | KS | Brier |
 | --- | ---: | ---: | ---: |
 | Logistic Regression | 0.665 | 0.241 | 0.167 |
-| LightGBM (uncalibrated) | 0.670 | 0.246 | 0.165 |
-| **LightGBM (isotonic)** | **0.670** | **0.246** | **0.164** |
-
-The calibrated model's **decile-1 default rate is 6.8%** vs **43.5% in decile 10** — a **6.4× lift** that is more informative than raw AUC for a rank-ordering business like consumer credit.
-
-![cutoff](reports/cutoff.png)
-![calibration](reports/calibration.png)
+| LightGBM (uncalibrated) | 0.670 | 0.245 | 0.165 |
+| **LightGBM (isotonic)** | **0.669** | **0.244** | **0.164** |
 
 ---
 
@@ -113,34 +120,31 @@ Per-loan expected profit:
 
 ```
 E[profit] = (1 - PD) · interest_earned − PD · (LGD · loan_amnt)
-interest_earned ≈ loan_amnt · (int_rate / 100) · (term_months / 12)
+interest_earned = installment · term_months − loan_amnt   (exact amortized)
 LGD assumed flat at 0.85 (see src/config.LGD)
 ```
 
+The exact amortized interest comes straight from the servicer-published `installment` column. A naive `loan_amnt × rate × years` approximation nearly doubles total interest, because the principal declines each month on an amortizing loan — using it would make the cutoff rule meaningless.
+
 `src/cutoff.py` sweeps thresholds across `0.02 ≤ t ≤ 0.60` and finds the `t` that maximises expected portfolio profit on the test set.
 
-**Headline:**
+**Result:**
 
-| Policy | Approval rate | Default rate | Realized profit |
-| --- | ---: | ---: | ---: |
-| Approve everyone | 100% | 20.1% | $823.7M |
-| **Model-optimal cutoff** (PD ≤ 55.9%) | 98.7% | 22.1% | $818.1M |
+| Policy | Approvals | Default rate | Expected profit | Realized profit |
+| --- | ---: | ---: | ---: | ---: |
+| Approve everyone | 319,376 | 20.1% | — | $52.9M |
+| **Model cutoff (PD ≤ 35.4%)** | **275,961** | **19.6%** | **$177.6M** | **$73.0M** |
 
-### What this says, honestly
+The model declines the top-PD **~14%** of applicants, reducing the realized default rate by 0.5pp and lifting realized profit by **+38%** on the test window. The expected-profit figure sits above the realized figure because the LGD assumption (0.85) and the ignored prepayment effect both bias expectations high — the directional ranking of policies is what matters, not the absolute dollar level.
 
-Within the configured cutoff grid, the model-chosen rule is **marginally worse than approving everyone** on realized profit. There are two forces driving that:
-
-1. The dropped-by-design features (grade, sub-grade, int_rate) carried most of the easily-learnable risk signal. The remaining features deliver a 6.4× decile lift, but the AUC of 0.67 is modest.
-2. The interest-weighted profit math is forgiving: a 36-month, 13% loan earns ~$3.9k in modelled interest on $10k principal, vs ~$8.5k expected loss on default. The break-even PD is ~0.31, and the test set's PD distribution concentrates well below that.
-
-The real portfolio value of this model is **loan pricing / tiering**, not a hard approve/decline gate — a decile 10 loan at 43.5% realized default rate should carry a materially higher interest rate than a decile 1 loan at 6.8%. That is the natural follow-up project.
+Beyond approve/decline, the natural extension is **risk-based pricing**: decile-10 loans at 43.5% realized default rate should carry a materially higher APR than decile-1 loans at 6.8%, which is how real consumer lenders actually use PD models.
 
 ## 5. Limitations
 
 - **Reject inference.** LendingClub only publishes funded loans, so the model never sees declined applicants. Population drift between funded and all applicants is unmeasured.
 - **No bureau score.** This Kaggle snapshot was privacy-scrubbed. A production model would have FICO; without it the ceiling on AUC is lower than for most published LendingClub analyses.
-- **Flat LGD.** A 0.85 recovery-rate assumption; a real risk team would model LGD separately or run sensitivity across `[0.7, 0.85, 1.0]`.
-- **Interest-earned approximation.** The profit math ignores prepayment, amortisation, cost of funds, and servicing cost.
+- **Flat LGD.** A 0.85 recovery-rate assumption; a real risk team would model LGD separately or run sensitivity across `[0.7, 0.85, 1.0]`. This drives the gap between expected and realized profit in the decision layer.
+- **No prepayment or cost-of-funds modelling.** The profit math uses the scheduled amortization but assumes every non-defaulting loan runs to maturity and that funding is free.
 - **Fairness not assessed.** A fair-lending analysis across `addr_state` and other protected proxies belongs in a separate project.
 
 ## 6. AI-assisted development note

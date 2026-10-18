@@ -85,4 +85,5 @@ NON_FEATURE_COLS: tuple[str, ...] = (
     "grade",
     "sub_grade",
     "int_rate",
+    "installment",
 )

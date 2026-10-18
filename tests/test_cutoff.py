@@ -10,10 +10,12 @@ from src.cutoff import _augment, sweep_cutoffs
 
 def _toy_predictions() -> pd.DataFrame:
     # 10 loans, equal size, mix of good/bad and low/high PD.
+    # installment = $332.14/mo on $10k @ 12% / 36mo (standard amortization).
     return pd.DataFrame(
         {
             "loan_amnt": [10_000] * 10,
             "int_rate": [12.0] * 10,
+            "installment": [332.14] * 10,
             "term_months": [36] * 10,
             "defaulted": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
             "pd_hat": [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.40, 0.55, 0.80],
@@ -23,8 +25,8 @@ def _toy_predictions() -> pd.DataFrame:
 
 def test_augment_interest_formula():
     aug = _augment(_toy_predictions())
-    expected = 10_000 * (12.0 / 100.0) * (36 / 12.0)
-    assert aug["interest_earned"].iloc[0] == expected
+    expected = 332.14 * 36 - 10_000  # ~$1957
+    assert abs(aug["interest_earned"].iloc[0] - expected) < 0.01
 
 
 def test_realized_profit_default_pays_lgd():

@@ -1,9 +1,14 @@
 """Decision layer: sweep probability cutoffs, pick the one that maximises expected profit.
 
-Profit per loan:
+Profit per loan (fully amortizing):
 
     E[profit] = (1 - PD) * interest_earned - PD * (LGD * loan_amnt)
-    interest_earned ≈ loan_amnt * (int_rate / 100) * (term_months / 12)
+    interest_earned = installment * term_months - loan_amnt
+
+Using the real amortization schedule (via the servicer-published ``installment``
+column) rather than a simple ``loan_amnt * rate * years`` approximation —
+the simple formula roughly doubles total interest because principal declines
+each month on an amortizing loan.
 
 The chart overlays an "approve-everyone" baseline so the lift from the model is visible.
 """
@@ -23,9 +28,8 @@ logger = logging.getLogger(__name__)
 
 def _augment(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["interest_earned"] = (
-        df["loan_amnt"] * (df["int_rate"] / 100.0) * (df["term_months"] / 12.0)
-    )
+    # Exact scheduled total interest from the amortization schedule.
+    df["interest_earned"] = df["installment"] * df["term_months"] - df["loan_amnt"]
     df["exp_profit"] = (
         (1.0 - df["pd_hat"]) * df["interest_earned"]
         - df["pd_hat"] * (LGD * df["loan_amnt"])

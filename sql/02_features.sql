@@ -11,7 +11,8 @@ SELECT
     loan_amnt,
     funded_amnt,
     recoveries,               -- carried for the realized-profit calc in cutoff.py only
-    int_rate,                 -- carried for the revenue calc in cutoff.py; dropped from features in train.py
+    int_rate,                 -- carried for display; dropped from features in train.py
+    installment,              -- monthly payment; drives exact amortized interest in cutoff.py
     CAST(REPLACE(term, ' months', '') AS INT) AS term_months,
     CAST(REPLACE(revol_util, '%', '') AS NUMERIC) AS revol_util,
     loan_amnt / NULLIF(annual_inc, 0) AS loan_to_income,
