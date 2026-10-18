@@ -37,6 +37,20 @@ Per-decile break-even APR vs what LendingClub actually charged:
 - Reject inference is unmodeled — LendingClub only publishes funded loans.
 - The Kaggle snapshot is privacy-scrubbed (no FICO), so a production model with full bureau access would have a higher AUC ceiling.
 
+## LGD sensitivity
+
+| LGD | Optimal cutoff | Approval | Realized profit |
+| ---: | ---: | ---: | ---: |
+| 0.70 | 43.6% | 93.7% | $220.2M |
+| 0.85 | 36.6% | 88.9% | $77.3M |
+| 1.00 | 20.2% | 58.6% | $5.0M |
+
+Model is sharply LGD-sensitive. At zero recoveries the optimal rule approves ~59% of applicants (deciles 1–5 only); a production deployment needs its own LGD estimate.
+
+## Fair-lending audit
+
+Four-fifths-rule disparate-impact ratios across three proxies at the operating cutoff (PD ≤ 35.4%). No flags on `addr_state` (49 states) or `home_ownership` (3 groups). One flag on `purpose`: `small_business` loans approve at 64.2% of the reference group's rate (ratio 0.68). That group's actual default rate is 35.9% — the model is responding to real risk, not inventing it. Compliance-grade mitigation is to re-price small-business loans through the pricing layer rather than decline them.
+
 ## Follow-ups
 
-Fair-lending audit across `addr_state` and protected proxies. LGD sensitivity across `[0.7, 0.85, 1.0]`. Model borrower APR elasticity to translate the pricing policy into a realistic revenue forecast.
+Model borrower APR elasticity to translate the pricing policy into a realistic revenue forecast. Replace the flat LGD with a conditional model fit on the recoveries column. Add a reject-inference study using LendingClub's declined-applicants file (if obtainable).

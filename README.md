@@ -177,19 +177,47 @@ The APR is recovered numerically with Brent's method against the standard amorti
 
 The 400% number is directional, not a forecast: it holds applicant behavior constant under a higher APR, assumes no competitor response, and keeps the LGD = 0.85 assumption. The real takeaway is that LendingClub's margin on this cohort is roughly 1% of originated principal, which agrees with their published financials in the same era. A pricing policy derived from the model restores a meaningful risk premium.
 
-## 6. Limitations
+## 6. LGD sensitivity
+
+LGD is the single biggest unknown in the profit math. `src/sensitivity.py` re-solves the approve/decline cutoff at three loss-given-default assumptions:
+
+| LGD | Optimal cutoff PD | Approval rate | Realized profit |
+| ---: | ---: | ---: | ---: |
+| 0.70 | 43.6% | 93.7% | $220.2M |
+| 0.85 *(base case)* | 36.6% | 88.9% | $77.3M |
+| 1.00 | 20.2% | 58.6% | $5.0M |
+
+The model is highly LGD-sensitive. At LGD = 1.0 (zero recoveries) the optimal policy approves only ~59% of applicants — essentially deciles 1 through 5 — and the realized profit collapses to $5M. A production model would need its own LGD estimate; the recoveries carried through from the SQL layer suggest a realized LGD closer to 0.9, which is why the base case sits where it does.
+
+![sensitivity](reports/sensitivity.png)
+
+## 7. Fair-lending audit
+
+Protected characteristics (race, sex, age) are not in the LendingClub data and must never enter the model. `src/fairness.py` audits three proxies routinely tested by compliance teams: `home_ownership`, `purpose`, and `addr_state`. For each group with ≥500 loans, it reports the approval rate under the operating cutoff (PD ≤ 35.4%), the realized default rate, and the **disparate-impact ratio** = group approval rate / reference approval rate. The four-fifths rule flags groups below 0.80.
+
+| Column | Groups audited | Flagged | Worst group | Ratio |
+| --- | ---: | ---: | --- | ---: |
+| `home_ownership` | 3 | 0 | — | — |
+| `addr_state` | 49 | 0 | — | — |
+| `purpose` | 11 | **1** | `small_business` | **0.68** |
+
+The `small_business` flag is real but defensible: that group's **actual default rate is 35.9%** on the test set, roughly double the base rate of 20.1%. The model is not inventing risk; it is responding to it. The compliance answer is to document the model's reliance on `purpose`, verify the feature does not proxy for a protected class, and consider **pricing the risk rather than declining it** — which is exactly the use case `src/pricing.py` was built for. Decile-level repricing lets small-business loans clear underwriting at a higher APR instead of being gated out.
+
+![fairness-purpose](reports/fairness_purpose.png)
+
+## 8. Limitations
 
 - **Reject inference.** LendingClub only publishes funded loans, so the model never sees declined applicants. Population drift between funded and all applicants is unmeasured.
 - **No bureau score.** This Kaggle snapshot was privacy-scrubbed. A production model would have FICO; without it the ceiling on AUC is lower than for most published LendingClub analyses.
-- **Flat LGD.** A 0.85 recovery-rate assumption; a real risk team would model LGD separately or run sensitivity across `[0.7, 0.85, 1.0]`. This drives the gap between expected and realized profit in the decision layer.
+- **Flat LGD assumption.** The headline numbers use LGD = 0.85; section 6 shows the full sensitivity.
 - **No prepayment or cost-of-funds modelling.** The profit math uses the scheduled amortization but assumes every non-defaulting loan runs to maturity and that funding is free.
-- **Fairness not assessed.** A fair-lending analysis across `addr_state` and other protected proxies belongs in a separate project.
+- **No pricing elasticity.** The $264M pricing uplift in section 5 holds applicant behavior constant under a higher APR, assuming no churn and no competitor response — a directional measurement, not a revenue forecast.
 
-## 7. AI-assisted development note
+## 9. AI-assisted development note
 
 An earlier draft of this repository was scaffolded by Gemini Flash from a prompt-style README. The current state is the result of a cleanup pass with Claude: fixing the leakage check (previously asserted on a column name that doesn't exist), replacing `pandas.to_sql` with `psycopg3.cursor.copy()`, updating the calibrator to use `FrozenEstimator` (the pre-1.6 `cv="prefit"` path is removed in sklearn 1.9), carrying `earliest_cr_line` and `inq_last_6mths` through the SQL so the engineered features actually survive to the model, and rewriting this README to describe what the code does rather than what the prompt originally asked for. Pipeline outputs (metrics, decile table, calibration plot, cutoff chart) are reproduced from a live run against the Kaggle CSV.
 
-## 8. Reproduce
+## 10. Reproduce
 
 Requires Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), and Docker.
 
@@ -203,9 +231,9 @@ make all     # data -> features -> train -> evaluate -> cutoff
 make test    # 32 pytest cases
 ```
 
-Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`, `make pricing`.
+Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`, `make pricing`, `make sensitivity`, `make fairness`.
 
-## 9. Repo layout
+## 11. Repo layout
 
 ```
 .
@@ -227,7 +255,9 @@ Individual stages: `make data`, `make features`, `make train`, `make evaluate`, 
 │   ├── train.py            # LogReg + LightGBM + isotonic calibration
 │   ├── evaluate.py         # KS, Brier, decile table, calibration plot
 │   ├── cutoff.py           # expected-profit approve/decline sweep
-│   └── pricing.py          # per-decile break-even APR + policy simulation
-├── tests/                  # 38 pytest cases: split, cutoff, pricing, leakage, evaluate
+│   ├── pricing.py          # per-decile break-even APR + policy simulation
+│   ├── sensitivity.py      # LGD sweep over cutoff + pricing
+│   └── fairness.py         # disparate-impact audit on protected proxies
+├── tests/                  # 43 pytest cases across every module
 └── reports/                # pipeline outputs (gitignored)
 ```

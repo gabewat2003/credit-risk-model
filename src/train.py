@@ -153,9 +153,19 @@ def run_training() -> None:
 
     # Predictions used by the cutoff decision layer. int_rate and term_months
     # are the only non-feature loan attributes needed to compute revenue.
-    predictions = test[
-        ["id", "loan_amnt", "funded_amnt", "int_rate", "installment", "term_months", "defaulted"]
-    ].copy()
+    carry_cols = [
+        "id",
+        "loan_amnt",
+        "funded_amnt",
+        "int_rate",
+        "installment",
+        "term_months",
+        "defaulted",
+        "addr_state",
+        "home_ownership",
+        "purpose",
+    ]
+    predictions = test[carry_cols].copy()
     predictions["pd_logreg"] = p_logreg_test
     predictions["pd_lgbm"] = p_lgbm_test
     predictions["pd_hat"] = p_cal_test  # the production score
