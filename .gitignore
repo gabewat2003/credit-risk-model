@@ -1,1 +1,27 @@
+# Data
 data/raw/loan.csv
+data/raw/*.csv
+
+# Env
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Model + prediction artifacts (large / regenerable by pipeline).
+# PNG charts, CSV summaries, and markdown memos ARE committed so the README
+# renders on GitHub and the headline results are visible without a local run.
+reports/*.parquet
+reports/*.joblib
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

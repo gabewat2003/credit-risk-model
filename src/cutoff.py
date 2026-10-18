@@ -1,90 +1,134 @@
-"""
-src/cutoff.py
-Implements the decision layer: computes expected profit per loan across probability cutoffs,
-evaluates optimal thresholds, and generates summary visualizations and outputs.
+"""Decision layer: sweep probability cutoffs, pick the one that maximises expected profit.
+
+Profit per loan:
+
+    E[profit] = (1 - PD) * interest_earned - PD * (LGD * loan_amnt)
+    interest_earned ≈ loan_amnt * (int_rate / 100) * (term_months / 12)
+
+The chart overlays an "approve-everyone" baseline so the lift from the model is visible.
 """
 
-import os
+from __future__ import annotations
+
+import logging
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
+from src.config import CUTOFF_GRID_MAX, CUTOFF_GRID_MIN, CUTOFF_GRID_STEPS, LGD, REPORTS_DIR
+
+logger = logging.getLogger(__name__)
 
 
-def run_decision_layer():
-    print("Loading test predictions...")
-    if not os.path.exists("reports/test_predictions.parquet"):
-        print("Predictions not found. Run train.py first.")
-        return
-
-    test = pd.read_parquet("reports/test_predictions.parquet")
-
-    # Financial assumptions
-    # E[profit] = (1 - PD) * interest_earned - PD * (LGD * principal)
-    # interest_earned approx loan_amnt * (int_rate / 100) * (term_months / 12)
-    lgd = 0.85
-    test["interest_earned"] = (
-        test["loan_amnt"] * (test["int_rate"] / 100.0) *
-        (test["term_months"] / 12.0)
+def _augment(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["interest_earned"] = (
+        df["loan_amnt"] * (df["int_rate"] / 100.0) * (df["term_months"] / 12.0)
     )
-    test["exp_profit"] = (1.0 - test["pd_hat"]) * test["interest_earned"] - test[
-        "pd_hat"
-    ] * (lgd * test["loan_amnt"])
-    test["realized_profit"] = np.where(
-        test["defaulted"] == 0, test["interest_earned"], -
-        lgd * test["loan_amnt"]
+    df["exp_profit"] = (
+        (1.0 - df["pd_hat"]) * df["interest_earned"]
+        - df["pd_hat"] * (LGD * df["loan_amnt"])
     )
+    df["realized_profit"] = np.where(
+        df["defaulted"] == 0,
+        df["interest_earned"],
+        -LGD * df["loan_amnt"],
+    )
+    return df
 
+
+def sweep_cutoffs(df: pd.DataFrame) -> pd.DataFrame:
+    """Expected- and realized-profit totals across the configured cutoff grid."""
     rows = []
-    thresholds = np.linspace(0.02, 1.00, 100)
+    thresholds = np.linspace(CUTOFF_GRID_MIN, CUTOFF_GRID_MAX, CUTOFF_GRID_STEPS)
     for t in thresholds:
-        approved = test[test["pd_hat"] <= t]
-        if len(approved) == 0:
+        approved = df[df["pd_hat"] <= t]
+        if approved.empty:
             continue
         rows.append(
             {
                 "cutoff": t,
-                "approval_rate": len(approved) / len(test),
+                "approval_rate": len(approved) / len(df),
                 "realized_default_rate": approved["defaulted"].mean(),
                 "expected_profit": approved["exp_profit"].sum(),
                 "realized_profit": approved["realized_profit"].sum(),
             }
         )
+    return pd.DataFrame(rows)
 
-    df_sweep = pd.DataFrame(rows)
-    optimal_row = df_sweep.loc[df_sweep["expected_profit"].idxmax()]
 
-    print("\n--- Decision Layer Results ---")
-    print(f"Optimal Cutoff PD       : {optimal_row['cutoff']:.2%}")
-    print(f"Approval Rate           : {optimal_row['approval_rate']:.2%}")
-    print(f"Realized Default Rate   : {
-          optimal_row['realized_default_rate']:.2%}")
-    print(f"Total Expected Profit   : ${optimal_row['expected_profit']:,.2f}")
-    print(f"Total Realized Profit   : ${optimal_row['realized_profit']:,.2f}")
+def run_decision_layer() -> None:
+    preds_path = REPORTS_DIR / "test_predictions.parquet"
+    if not preds_path.exists():
+        raise FileNotFoundError(f"{preds_path} missing — run `make train` first.")
 
-    # Plotting approval rate vs expected profit
-    plt.figure(figsize=(9, 5))
-    plt.plot(
-        df_sweep["approval_rate"] * 100,
-        df_sweep["expected_profit"] / 1e6,
-        label="Expected Profit",
+    df = _augment(pd.read_parquet(preds_path))
+
+    sweep = sweep_cutoffs(df)
+    optimal = sweep.loc[sweep["expected_profit"].idxmax()]
+    approve_all_profit = df["realized_profit"].sum() / 1e6
+
+    logger.info("--- Decision Layer Results ---")
+    logger.info("Optimal cutoff PD    : %.2f%%", optimal["cutoff"] * 100)
+    logger.info("Approval rate        : %.1f%%", optimal["approval_rate"] * 100)
+    logger.info("Realized default rate: %.2f%%", optimal["realized_default_rate"] * 100)
+    logger.info("Total expected profit: $%.2fM", optimal["expected_profit"] / 1e6)
+    logger.info("Total realized profit: $%.2fM", optimal["realized_profit"] / 1e6)
+    logger.info("Approve-all realized : $%.2fM", approve_all_profit)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(
+        sweep["approval_rate"] * 100,
+        sweep["expected_profit"] / 1e6,
+        label="Expected profit (model cutoff)",
         color="teal",
         lw=2,
     )
-    plt.axvline(
-        optimal_row["approval_rate"] * 100,
+    ax.plot(
+        sweep["approval_rate"] * 100,
+        sweep["realized_profit"] / 1e6,
+        label="Realized profit (test set)",
+        color="orange",
+        lw=1.5,
+        alpha=0.8,
+    )
+    ax.axhline(
+        approve_all_profit,
+        color="gray",
+        linestyle=":",
+        label=f"Approve everyone (${approve_all_profit:.1f}M)",
+    )
+    ax.axvline(
+        optimal["approval_rate"] * 100,
         color="crimson",
         linestyle="--",
-        label=f"Optimal Cutoff ({optimal_row['cutoff']:.1%})",
+        label=f"Optimal cutoff ({optimal['cutoff']:.1%} PD)",
     )
-    plt.title("Approval Rate vs. Expected Portfolio Profit")
-    plt.xlabel("Approval Rate (%)")
-    plt.ylabel("Total Expected Profit ($ Millions)")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("reports/approval_vs_profit.png", dpi=300)
-    print("\nSaved chart to reports/approval_vs_profit.png")
+    ax.set_title("Approval rate vs. portfolio profit")
+    ax.set_xlabel("Approval rate (%)")
+    ax.set_ylabel("Total profit ($ millions)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    out_path = REPORTS_DIR / "cutoff.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    logger.info("Wrote %s", out_path)
+
+    sweep_path = REPORTS_DIR / "cutoff_sweep.csv"
+    sweep.to_csv(sweep_path, index=False)
+    logger.info("Wrote %s", sweep_path)
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    run_decision_layer()
 
 
 if __name__ == "__main__":
-    run_decision_layer()
+    main()

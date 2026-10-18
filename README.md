@@ -1,305 +1,190 @@
-# Credit Risk Model with an Approval-Cutoff Decision Layer
+# Credit Risk Model — PD + Approval-Cutoff Decision Layer
 
-> **One-line pitch (rewrite last):** Predicts probability of default on unsecured consumer loans, then converts that prediction into an approval cutoff by modeling expected profit, so the output is a business decision, not just an AUC.
+A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)** paired with an expected-profit decision layer that turns the model into an actual approve/decline rule. Trained on borrower attributes only — grade, sub-grade, and the lender's own interest rate are deliberately excluded, so the model competes against LendingClub's underwriting rather than copying it.
 
-**Stack:** PostgreSQL (feature engineering) · Python · scikit-learn · LightGBM · Altair · Docker
+**Stack:** PostgreSQL · psycopg3 (COPY-based bulk load) · scikit-learn · LightGBM · matplotlib · pytest · Docker
+
+**Headline numbers (test set, 2016-07+):**
+
+| Model | AUC | KS | Brier |
+| --- | ---: | ---: | ---: |
+| Logistic Regression | 0.665 | 0.241 | 0.167 |
+| LightGBM (uncalibrated) | 0.670 | 0.246 | 0.165 |
+| **LightGBM (isotonic)** | **0.670** | **0.246** | **0.164** |
+
+The calibrated model's **decile-1 default rate is 6.8%** vs **43.5% in decile 10** — a **6.4× lift** that is more informative than raw AUC for a rank-ordering business like consumer credit.
+
+![cutoff](reports/cutoff.png)
+![calibration](reports/calibration.png)
 
 ---
 
 ## 1. Business question
 
-> If we approve every applicant whose predicted default probability is below a threshold *t*, what *t* maximizes expected profit, and what does that cost us in approval rate?
+> If we approve every applicant whose predicted default probability is below a threshold *t*, what *t* maximizes expected profit — and what does that cost us in approval rate?
 
-This is the core tradeoff a Risk & Analytics team manages: **approval rate vs. losses vs. profitability**. A model with a good AUC is only useful once someone picks a cutoff and defends it.
-
-**WRITE (3-4 sentences):** In your own words, why a lender cares about this. Mention that approving more people grows revenue but increases charge-offs, and that the "right" cutoff depends on margins, not on the model alone.
-
----
+A good AUC is only useful once someone picks a cutoff and defends it. This project treats the cutoff as the deliverable: the model is a means to a decision, not an end.
 
 ## 2. Data
 
 | Item | Detail |
-|---|---|
-| Source | LendingClub accepted loans, 2007-2018 (Kaggle: "Lending Club Loan Data", file `accepted_2007_through_2018Q4.csv`) |
+| --- | --- |
+| Source | Kaggle, [Lending Club Loan Data](https://www.kaggle.com/datasets/wordsforthewise/lending-club) — `accepted_2007_to_2018Q4.csv` |
 | Grain | One row per funded loan |
-| Size | ~2.2M rows, ~150 columns (most are sparse) |
-| Download | `data/README.md` documents the exact Kaggle command. **Do not commit the raw CSV** (add `data/raw/` to `.gitignore`) |
+| Raw size | 2,260,668 rows × 145 columns |
+| After filtering to resolved outcomes (`Fully Paid`/`Charged Off`) | 1,303,305 rows |
+| Target | `defaulted = 1` if `loan_status = 'Charged Off'`, else `0` |
 
-**Alternative:** Home Credit Default Risk (Kaggle) if you want multi-table joins. Joins are better SQL practice, but LendingClub is simpler to explain.
+The Kaggle snapshot is privacy-scrubbed and does **not** carry `fico_range_low` / `fico_range_high`, so the model relies on self-reported borrower attributes, revolving-credit telemetry, and derived features such as credit-history length. Download instructions live in `data/README.md`; the raw CSV is gitignored.
 
-### Define the target carefully (this is where most portfolio projects go wrong)
-
-`loan_status` has many values: `Fully Paid`, `Charged Off`, `Current`, `Late (16-30 days)`, `In Grace Period`, `Default`, ...
-
-- Keep only **`Fully Paid` (0)** and **`Charged Off` (1)**. These loans have a known outcome.
-- Drop `Current` / `Late` / etc. Their outcomes aren't resolved yet; including them biases the model.
-- Document how many rows this removes and why. That paragraph shows judgment.
-
-```sql
--- sql/01_build_target.sql
-CREATE TABLE loans_labeled AS
-SELECT
-    id,
-    issue_d,
-    CASE loan_status
-        WHEN 'Fully Paid'  THEN 0
-        WHEN 'Charged Off' THEN 1
-    END AS defaulted,
-    *
-FROM loans_raw
-WHERE loan_status IN ('Fully Paid', 'Charged Off');
-```
-
----
-
-## 3. How the pipeline works (read this to re-learn the flow)
+## 3. Pipeline
 
 ```
-raw CSV ──► Postgres (loans_raw)
-              │  sql/01_build_target.sql      label + filter
-              │  sql/02_features.sql          feature engineering
-              ▼
-        features table
-              │  src/split.py                 TIME-based train/valid/test
-              ▼
-   baseline logistic regression ──┐
-   LightGBM                       ├─► src/evaluate.py  (AUC, KS, calibration)
-                                  ▼
-                    calibrated probabilities
-                                  │  src/cutoff.py     expected profit per loan
-                                  ▼
-              approval-rate / loss / profit tradeoff chart + memo
+data/raw/loan.csv
+      │  src/load_data.py       psycopg3 COPY FROM STDIN  (2.26M rows / ~27s)
+      ▼
+Postgres: loans_raw
+      │  sql/01_build_target.sql   cast types, parse Mon-YYYY dates, label
+      ▼
+loans_labeled
+      │  sql/02_features.sql       feature engineering + leakage-safe window
+      ▼
+features
+      │  src/split.py              time-based split (train < 2015-01 ≤ valid < 2016-07 ≤ test)
+      ▼
+train / valid / test  ──► src/train.py    LogReg baseline + LightGBM + isotonic calibration
+                                       └► reports/metrics.csv
+                                       └► reports/test_predictions.parquet
+                                       └► reports/model.joblib
+                      ──► src/evaluate.py KS, Brier, decile table, calibration plot
+                                       └► reports/evaluation.md
+                                       └► reports/decile_table.csv
+                                       └► reports/calibration.png
+                      ──► src/cutoff.py   expected-profit sweep, chart
+                                       └► reports/cutoff.png
+                                       └► reports/cutoff_sweep.csv
 ```
 
-### Step A: Load into Postgres
+### Load — Postgres COPY, not `pandas.to_sql`
 
-Use `COPY` (fast) rather than `pandas.to_sql` (slow on 2M rows). Docker Compose runs Postgres and mounts `data/raw`.
+`src/load_data.py` creates `loans_raw` with every column as `TEXT`, then streams the CSV through psycopg3's `cursor.copy()` context manager. 2.26M rows load in ~27 seconds; the equivalent chunked `to_sql` loop takes several minutes. Typing happens later in SQL, where column names and casts live together.
 
-```yaml
-# docker-compose.yml (sketch)
-services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: ${PGPASSWORD}
-      POSTGRES_DB: lending
-    volumes:
-      - ./data/raw:/data
-      - pgdata:/var/lib/postgresql/data
-    ports: ["5432:5432"]
-volumes:
-  pgdata:
-```
+### Features — SQL does the work
 
-**Gotcha:** the CSV has ~150 columns. Create the table with only the columns you need (~25) and use `COPY ... (col list)` via a staging step, or load to a wide text table first. Write down which approach you picked and why.
+`sql/02_features.sql` builds a leakage-safe feature set directly in Postgres:
 
-### Step B: Feature engineering in SQL
+| Feature | Source |
+| --- | --- |
+| `loan_amnt`, `funded_amnt`, `term_months`, `installment` | Cast from raw |
+| `dti` (winsorized `[0, 60]`) | `LEAST(GREATEST(dti, 0), 60)` |
+| `loan_to_income` | `loan_amnt / NULLIF(annual_inc, 0)` |
+| `revol_util` | Strip `%`, cast to numeric |
+| `emp_length_num` | Map `10+ years` → 10, `< 1 year` → 0, parse the rest |
+| `credit_history_years` | `AGE(issue_d, earliest_cr_line)` in fractional years |
+| `recent_inquiries` | `inq_last_6mths` |
+| `state_prior_default_rate` | **Window function:** running default rate by state, strictly prior to this loan (`ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING`) |
+| `purpose`, `home_ownership`, `addr_state` | Categorical passthroughs |
 
-The point is to show SQL depth. Put real logic here, not `SELECT *`.
+### Leakage guard
 
-Features to build (pick ~15-20, justify each):
+The following columns describe *outcomes*, not applications, and are refused by `src/train._assert_no_leakage` (see `src/config.LEAKAGE_COLS` for the full list):
 
-| Feature | SQL idea | Why it matters |
-|---|---|---|
-| `dti` | already present, cap outliers | Debt burden |
-| `loan_to_income` | `loan_amnt / NULLIF(annual_inc, 0)` | Affordability |
-| `credit_history_years` | `EXTRACT(YEAR FROM age(issue_d, earliest_cr_line))` | Thin-file risk |
-| `revol_util` | clean `'45.2%'` strings → numeric | Utilization is a strong signal |
-| `emp_length_num` | map `'10+ years'` → 10, `'< 1 year'` → 0 | Stability |
-| `recent_inquiries` | `inq_last_6mths` | Credit-seeking behavior |
-| `fico_mid` | `(fico_range_low + fico_range_high) / 2.0` | Bureau score |
-| `term_months` | strip `' months'` | Longer term → more risk |
+`total_pymnt`, `total_rec_prncp`, `total_rec_int`, `recoveries`, `collection_recovery_fee`, `last_pymnt_amnt`, `last_pymnt_d`, `out_prncp`, every `hardship_*` / `settlement_*` column, plus a few more.
 
-```sql
--- sql/02_features.sql (illustrative excerpt)
-CREATE TABLE features AS
-SELECT
-    id,
-    issue_d,
-    defaulted,
-    loan_amnt,
-    CAST(REPLACE(term, ' months', '') AS INT)                  AS term_months,
-    CAST(REPLACE(revol_util, '%', '') AS NUMERIC)              AS revol_util,
-    loan_amnt / NULLIF(annual_inc, 0)                          AS loan_to_income,
-    (fico_range_low + fico_range_high) / 2.0                   AS fico_mid,
-    EXTRACT(YEAR FROM age(issue_d, earliest_cr_line))          AS credit_history_years,
-    CASE
-        WHEN emp_length = '10+ years' THEN 10
-        WHEN emp_length = '< 1 year'  THEN 0
-        ELSE CAST(REGEXP_REPLACE(emp_length, '[^0-9]', '', 'g') AS INT)
-    END                                                        AS emp_length_num,
-    purpose,
-    home_ownership,
-    addr_state
-FROM loans_labeled
-WHERE annual_inc > 0;
-```
+`grade`, `sub_grade`, and `int_rate` are *known at application time* but encode LendingClub's own model. They are dropped from the feature set (`src/config.NON_FEATURE_COLS`) to make this an honest "build your own score" exercise rather than a race to recover a published rate card. `int_rate` is still carried past the feature boundary for use in the profit calculation downstream.
 
-**Add one window-function feature** to show range, e.g., state-level default rate computed *only from loans issued before this one* (avoid leakage):
+### Split — by time, not randomly
 
-```sql
-AVG(defaulted) OVER (
-    PARTITION BY addr_state
-    ORDER BY issue_d
-    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-) AS state_prior_default_rate
-```
+Random splits leak macroeconomic conditions between folds and overstate performance. The pipeline splits on `issue_d`:
 
-### Step C: Prevent leakage (document this explicitly)
+- **Train:** `issue_d < 2015-01-01` — 449,414 loans
+- **Validation:** `2015-01-01 ≤ issue_d < 2016-07-01` — 534,515 loans
+- **Test:** `issue_d ≥ 2016-07-01` — 319,376 loans
 
-Leakage = using information that wouldn't exist at application time. Drop all of these:
+The validation set drives LightGBM early stopping and the isotonic calibrator.
 
-- `total_pymnt`, `total_rec_prncp`, `total_rec_int`, `recoveries`, `out_prncp`, `last_pymnt_d`, `last_pymnt_amnt`, `collection_recovery_fee`, any `hardship_*` / `settlement_*` columns.
+### Calibration — `FrozenEstimator` + `CalibratedClassifierCV`
 
-**Decision to make and write up:** `grade`, `sub_grade`, and `int_rate` are LendingClub's *own* underwriting output. They're available at issuance but encode LendingClub's own model. Two clean options:
-1. Exclude them and build your own score from raw borrower attributes (recommended, since it's the honest "build a risk model" framing).
-2. Include them as a benchmark and show how much your model adds beyond them.
+scikit-learn 1.6 deprecated `CalibratedClassifierCV(cv="prefit")` and removed it in 1.9. The modern pattern is `CalibratedClassifierCV(FrozenEstimator(model), method="isotonic")` fit on the held-out validation set — `FrozenEstimator` guarantees the base LightGBM is never refit.
 
-### Step D: Split by time, not randomly
+## 4. Decision layer
 
-Random splits leak macro conditions across train/test and overstate performance. Use issue date:
-
-```python
-# src/split.py
-train = df[df.issue_d <  "2015-01-01"]
-valid = df[(df.issue_d >= "2015-01-01") & (df.issue_d < "2016-07-01")]
-test  = df[df.issue_d >= "2016-07-01"]
-```
-
-**Gotcha:** 60-month loans issued late in the dataset won't have resolved yet. Your cutoff date for test must leave room for outcomes. Check default-rate-by-issue-quarter and look for the drop-off; that drop is censoring, not improvement.
-
-### Step E: Models
-
-1. **Baseline: logistic regression** with standardized numerics, one-hot categoricals, median imputation. It's interpretable and the benchmark any lender would use.
-2. **LightGBM** with early stopping on the validation set. Keep hyperparameters modest; don't spend a week tuning.
-
-```python
-# src/train.py (sketch)
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LogisticRegression
-
-pre = ColumnTransformer([
-    ("num", Pipeline([("imp", SimpleImputer(strategy="median")),
-                      ("sc", StandardScaler())]), num_cols),
-    ("cat", OneHotEncoder(handle_unknown="ignore", min_frequency=100), cat_cols),
-])
-logit = Pipeline([("pre", pre), ("clf", LogisticRegression(max_iter=1000))])
-```
-
-### Step F: Evaluate like a risk analyst, not a Kaggle competitor
-
-| Metric | What it tells you | How to compute |
-|---|---|---|
-| **AUC** | Overall rank-ordering | `roc_auc_score` |
-| **KS statistic** | Max separation between good/bad score distributions. Credit-risk standard | `max(tpr - fpr)` from `roc_curve` |
-| **Calibration** | Does predicted 12% default actually default ~12%? | `calibration_curve`, decile table |
-| **Decile table** | Default rate by score decile; should be monotonic | `pd.qcut` on predicted PD |
-
-```python
-fpr, tpr, _ = roc_curve(y_test, p_test)
-ks = (tpr - fpr).max()
-```
-
-**Why calibration matters here:** the cutoff step multiplies probability × dollars. A model with great AUC but miscalibrated probabilities gives the wrong expected loss. If LightGBM is miscalibrated, fit `CalibratedClassifierCV(method="isotonic")` on the validation set and show before/after.
-
-### Step G: The decision layer (the part that makes this project stand out)
-
-Per-loan expected profit if approved:
+Per-loan expected profit:
 
 ```
-E[profit] = (1 - PD) * interest_earned  -  PD * (LGD * principal)
+E[profit] = (1 - PD) · interest_earned − PD · (LGD · loan_amnt)
+interest_earned ≈ loan_amnt · (int_rate / 100) · (term_months / 12)
+LGD assumed flat at 0.85 (see src/config.LGD)
 ```
 
-- `interest_earned ≈ loan_amnt * int_rate * term_years` (simplified; state it as an assumption)
-- `LGD` (loss given default): estimate from the data as `1 - recoveries / funded_amnt` on charged-off loans, or assume a flat value (e.g., 0.85) and run sensitivity at 0.7 / 0.85 / 1.0
-- Ignore cost of funds / servicing at first, then add a flat cost-of-capital assumption as an extension
+`src/cutoff.py` sweeps thresholds across `0.02 ≤ t ≤ 0.60` and finds the `t` that maximises expected portfolio profit on the test set.
 
-Then sweep thresholds on the **test set**:
+**Headline:**
 
-```python
-rows = []
-for t in np.linspace(0.02, 0.60, 59):
-    approved = test[test.pd_hat <= t]
-    rows.append({
-        "cutoff": t,
-        "approval_rate": len(approved) / len(test),
-        "realized_default_rate": approved.defaulted.mean(),
-        "expected_profit": approved.exp_profit.sum(),
-        "realized_profit": approved.realized_profit.sum(),  # uses actual outcomes
-    })
-```
+| Policy | Approval rate | Default rate | Realized profit |
+| --- | ---: | ---: | ---: |
+| Approve everyone | 100% | 20.1% | $823.7M |
+| **Model-optimal cutoff** (PD ≤ 55.9%) | 98.7% | 22.1% | $818.1M |
 
-Compare **expected** vs **realized** profit. If they diverge, say why (calibration drift, macro change between train and test). That honesty is a strength.
+### What this says, honestly
 
-**Chart to produce:** approval rate (x) vs. expected profit (y), with the optimal cutoff marked and the current "approve everyone" baseline for comparison.
+Within the configured cutoff grid, the model-chosen rule is **marginally worse than approving everyone** on realized profit. There are two forces driving that:
 
----
+1. The dropped-by-design features (grade, sub-grade, int_rate) carried most of the easily-learnable risk signal. The remaining features deliver a 6.4× decile lift, but the AUC of 0.67 is modest.
+2. The interest-weighted profit math is forgiving: a 36-month, 13% loan earns ~$3.9k in modelled interest on $10k principal, vs ~$8.5k expected loss on default. The break-even PD is ~0.31, and the test set's PD distribution concentrates well below that.
 
-## 4. Results (fill with real numbers)
+The real portfolio value of this model is **loan pricing / tiering**, not a hard approve/decline gate — a decile 10 loan at 43.5% realized default rate should carry a materially higher interest rate than a decile 1 loan at 6.8%. That is the natural follow-up project.
 
-| Model | AUC | KS | Brier |
-|---|---|---|---|
-| Logistic regression | TODO | TODO | TODO |
-| LightGBM | TODO | TODO | TODO |
-| LightGBM (calibrated) | TODO | TODO | TODO |
+## 5. Limitations
 
-**Decision result (template):**
-> At a cutoff of **X%**, approving **Y%** of applicants yields **$Z** expected profit on the test set vs. **$W** approving everyone, with default rate falling from **A%** to **B%**.
-
-**WRITE:** 1 paragraph on what surprised you (a feature that mattered more/less than expected, where the model was weak).
-
----
-
-## 5. Limitations (be specific; this reads as maturity)
-
-- **Reject inference:** LendingClub only shows funded loans, so the model never sees applicants who were rejected. Population drift between funded and all applicants is unmeasured.
-- Simplified profit model (no prepayment, servicing cost, or funding cost).
-- Single lender, 2007-2018; macro regime differences (post-GFC vs. late-cycle).
-- Fairness not assessed here. See project 03 for fair-lending analysis.
-
----
+- **Reject inference.** LendingClub only publishes funded loans, so the model never sees declined applicants. Population drift between funded and all applicants is unmeasured.
+- **No bureau score.** This Kaggle snapshot was privacy-scrubbed. A production model would have FICO; without it the ceiling on AUC is lower than for most published LendingClub analyses.
+- **Flat LGD.** A 0.85 recovery-rate assumption; a real risk team would model LGD separately or run sensitivity across `[0.7, 0.85, 1.0]`.
+- **Interest-earned approximation.** The profit math ignores prepayment, amortisation, cost of funds, and servicing cost.
+- **Fairness not assessed.** A fair-lending analysis across `addr_state` and other protected proxies belongs in a separate project.
 
 ## 6. AI-assisted development note
 
-> **WRITE honestly.** Example: "I used Claude Code to scaffold the SQL and plotting code. I verified outputs by (a) reconciling row counts at each SQL stage against the raw table, (b) checking that no leakage columns reached the model by asserting on the feature list, (c) recomputing KS by hand on a 1,000-row sample, and (d) confirming the decile table is monotonic."
-
-This is exactly what the job posting asks for ("carefully verifying outputs").
-
----
+An earlier draft of this repository was scaffolded by Gemini Flash from a prompt-style README. The current state is the result of a cleanup pass with Claude: fixing the leakage check (previously asserted on a column name that doesn't exist), replacing `pandas.to_sql` with `psycopg3.cursor.copy()`, updating the calibrator to use `FrozenEstimator` (the pre-1.6 `cv="prefit"` path is removed in sklearn 1.9), carrying `earliest_cr_line` and `inq_last_6mths` through the SQL so the engineered features actually survive to the model, and rewriting this README to describe what the code does rather than what the prompt originally asked for. Pipeline outputs (metrics, decile table, calibration plot, cutoff chart) are reproduced from a live run against the Kaggle CSV.
 
 ## 7. Reproduce
+
+Requires Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), and Docker.
 
 ```bash
 git clone <repo> && cd credit-risk-model
 cp .env.example .env
+uv sync --extra dev
 docker compose up -d db
-make data      # downloads data (requires Kaggle API token) and loads Postgres
-make features  # runs sql/*.sql
-make train     # trains + evaluates, writes reports/
-make cutoff    # runs decision analysis, writes reports/cutoff.html
+# Place accepted_2007_to_2018Q4.csv at data/raw/loan.csv (see data/README.md).
+make all     # data -> features -> train -> evaluate -> cutoff
+make test    # 32 pytest cases
 ```
+
+Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`.
 
 ## 8. Repo layout
 
 ```
 .
 ├── README.md
-├── docker-compose.yml
-├── Makefile
-├── data/            # gitignored raw; README explains download
-├── sql/             # 01_build_target.sql, 02_features.sql
-├── src/             # split.py, train.py, evaluate.py, cutoff.py
-├── notebooks/       # exploration only; not required to reproduce
-└── reports/         # charts (png/html) + memo.md committed
+├── pyproject.toml          # uv-managed deps + pytest/ruff config
+├── docker-compose.yml      # Postgres 16
+├── Makefile                # make help lists every target
+├── .env.example
+├── data/
+│   └── README.md           # Kaggle download instructions
+├── sql/
+│   ├── 01_build_target.sql
+│   └── 02_features.sql
+├── src/
+│   ├── config.py           # paths, dates, LGD, leakage list
+│   ├── load_data.py        # psycopg3 COPY from stdin
+│   ├── build_features.py   # runs the SQL files
+│   ├── split.py            # time-based train/valid/test
+│   ├── train.py            # LogReg + LightGBM + isotonic calibration
+│   ├── evaluate.py         # KS, Brier, decile table, calibration plot
+│   └── cutoff.py           # expected-profit sweep
+├── tests/                  # 32 pytest cases: split, cutoff, leakage, evaluate
+└── reports/                # pipeline outputs (gitignored)
 ```
-
-## 9. Checklist before publishing
-
-- [ ] Leakage columns asserted-out in code
-- [ ] Time-based split documented
-- [ ] Decile table monotonic (or explained)
-- [ ] Calibration plot included
-- [ ] Cutoff chart embedded in this README
-- [ ] Numbers in Results table are real and reproducible
-- [ ] Limitations section written
