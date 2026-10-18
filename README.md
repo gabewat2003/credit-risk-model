@@ -1,16 +1,14 @@
-# Credit Risk Model — PD + Approval-Cutoff Decision Layer
+# Credit Risk Model — PD, Approval Cutoff, Risk-Based Pricing
 
-A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)** paired with an expected-profit decision layer that turns the model into an actual approve/decline rule. Trained on borrower attributes only — grade, sub-grade, and the lender's own interest rate are deliberately excluded, so the model competes against LendingClub's underwriting rather than copying it.
+A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)** that goes beyond `roc_auc_score` to answer the two questions a lender actually cares about: **who do we approve, and what rate do we charge them.** Trained on borrower attributes only — grade, sub-grade, and the lender's own interest rate are deliberately excluded, so the model competes against LendingClub's underwriting rather than copying it.
 
-**Headline result on 319k held-out test loans (2016-07+):**
+**Headline findings on 319k held-out test loans (2016-07+):**
 
-| Policy | Approval rate | Default rate | Realized profit |
-| --- | ---: | ---: | ---: |
-| Approve everyone | 100% | 20.1% | $52.9M |
-| **Model cutoff (PD ≤ 35.4%)** | **86.4%** | **19.6%** | **$73.0M (+38%)** |
+**Approve/decline.** At a model cutoff of PD ≤ 35.4%, the lender declines the riskiest 14% of applicants and lifts realized portfolio profit from $52.9M (approve everyone) to **$73.0M (+38%)** while trimming the default rate from 20.1% to 19.6%.
 
-The model declines the riskiest ~14% of applicants and lifts realized portfolio profit by **$20M** over a blanket-approve policy, with a **6.4× decile lift** (decile-1 default 6.8% vs decile-10 43.5%) driving the discriminatory power. AUC on the calibrated model is 0.670.
+**Risk-based pricing.** LendingClub's own APR structure under-prices the top risk deciles. For decile 9 (PD ≈ 34%) and decile 10 (PD ≈ 43%), the APR LendingClub charged in 2016–2018 sits **at or below** the actuarial break-even rate — meaning those loans are structurally unprofitable at any LGD above the recoveries the data actually shows. Pricing each decile at `break_even_apr + 3%` lifts the simulated portfolio from **$52.9M to $264.0M** of realized interest income on the same accepted population.
 
+![pricing](reports/pricing.png)
 ![cutoff](reports/cutoff.png)
 ![calibration](reports/calibration.png)
 
@@ -137,9 +135,49 @@ The exact amortized interest comes straight from the servicer-published `install
 
 The model declines the top-PD **~14%** of applicants, reducing the realized default rate by 0.5pp and lifting realized profit by **+38%** on the test window. The expected-profit figure sits above the realized figure because the LGD assumption (0.85) and the ignored prepayment effect both bias expectations high — the directional ranking of policies is what matters, not the absolute dollar level.
 
-Beyond approve/decline, the natural extension is **risk-based pricing**: decile-10 loans at 43.5% realized default rate should carry a materially higher APR than decile-1 loans at 6.8%, which is how real consumer lenders actually use PD models.
+## 5. Risk-based pricing
 
-## 5. Limitations
+A binary approve/decline rule is a blunt use of a PD model. Real consumer lenders use PD estimates to **price risk** — low-decile borrowers get the headline rate, high-decile borrowers get a markup that covers their expected loss, and only genuinely unprofitable borrowers are declined. `src/pricing.py` builds that pricing table.
+
+### Break-even math
+
+For a fully amortizing loan at APR `r` over `T` months with principal `L`, zero expected profit per loan at a given PD requires:
+
+```
+total_interest*     = PD · LGD · L / (1 - PD)
+installment*        = (L + total_interest*) / T
+r_break_even        = APR such that amortized_installment(L, r, T) = installment*
+```
+
+The APR is recovered numerically with Brent's method against the standard amortization formula.
+
+### What LendingClub charged vs what break-even demands
+
+| Decile | Model PD | Actual default rate | LendingClub APR | Break-even APR | Proposed APR (+3% margin) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.6% | 7.1% | 9.4% | 4.2% | 7.2% |
+| 2 | 10.1% | 11.4% | 11.0% | 6.9% | 9.9% |
+| 3 | 12.5% | 14.3% | 11.8% | 8.8% | 11.8% |
+| 4 | 15.1% | 17.4% | 12.5% | 10.7% | 13.7% |
+| 5 | 17.3% | 20.6% | 13.2% | 13.1% | 16.1% |
+| 6 | 20.0% | 23.3% | 13.9% | 14.8% | 17.8% |
+| 7 | 23.4% | 26.5% | 14.7% | 16.1% | 19.1% |
+| 8 | 28.0% | 29.9% | 15.8% | 16.8% | 19.8% |
+| 9 | 34.5% | 33.5% | 17.3% | 17.0% | 20.0% |
+| 10 | 48.1% | 42.8% | 20.0% | 22.1% | 25.1% |
+
+**The structural finding.** LendingClub's actual APR tracks the default rate roughly 1-for-1 across the deciles, which is close to zero expected margin before LGD is applied. Once a flat 85% loss-given-default is baked in, the break-even APR curve sits **above** the actual APR curve from decile 5 onward and crosses it hard at decile 10. On this test window, LendingClub priced the riskiest tier below break-even.
+
+### Portfolio uplift
+
+| Policy on the accepted population | Realized profit |
+| --- | ---: |
+| LendingClub's actual APRs | $52.9M |
+| Proposed: `break_even_apr + 3%` per decile | **$264.0M** |
+
+The 400% number is directional, not a forecast: it holds applicant behavior constant under a higher APR, assumes no competitor response, and keeps the LGD = 0.85 assumption. The real takeaway is that LendingClub's margin on this cohort is roughly 1% of originated principal, which agrees with their published financials in the same era. A pricing policy derived from the model restores a meaningful risk premium.
+
+## 6. Limitations
 
 - **Reject inference.** LendingClub only publishes funded loans, so the model never sees declined applicants. Population drift between funded and all applicants is unmeasured.
 - **No bureau score.** This Kaggle snapshot was privacy-scrubbed. A production model would have FICO; without it the ceiling on AUC is lower than for most published LendingClub analyses.
@@ -147,11 +185,11 @@ Beyond approve/decline, the natural extension is **risk-based pricing**: decile-
 - **No prepayment or cost-of-funds modelling.** The profit math uses the scheduled amortization but assumes every non-defaulting loan runs to maturity and that funding is free.
 - **Fairness not assessed.** A fair-lending analysis across `addr_state` and other protected proxies belongs in a separate project.
 
-## 6. AI-assisted development note
+## 7. AI-assisted development note
 
 An earlier draft of this repository was scaffolded by Gemini Flash from a prompt-style README. The current state is the result of a cleanup pass with Claude: fixing the leakage check (previously asserted on a column name that doesn't exist), replacing `pandas.to_sql` with `psycopg3.cursor.copy()`, updating the calibrator to use `FrozenEstimator` (the pre-1.6 `cv="prefit"` path is removed in sklearn 1.9), carrying `earliest_cr_line` and `inq_last_6mths` through the SQL so the engineered features actually survive to the model, and rewriting this README to describe what the code does rather than what the prompt originally asked for. Pipeline outputs (metrics, decile table, calibration plot, cutoff chart) are reproduced from a live run against the Kaggle CSV.
 
-## 7. Reproduce
+## 8. Reproduce
 
 Requires Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), and Docker.
 
@@ -165,9 +203,9 @@ make all     # data -> features -> train -> evaluate -> cutoff
 make test    # 32 pytest cases
 ```
 
-Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`.
+Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`, `make pricing`.
 
-## 8. Repo layout
+## 9. Repo layout
 
 ```
 .
@@ -188,7 +226,8 @@ Individual stages: `make data`, `make features`, `make train`, `make evaluate`, 
 │   ├── split.py            # time-based train/valid/test
 │   ├── train.py            # LogReg + LightGBM + isotonic calibration
 │   ├── evaluate.py         # KS, Brier, decile table, calibration plot
-│   └── cutoff.py           # expected-profit sweep
-├── tests/                  # 32 pytest cases: split, cutoff, leakage, evaluate
+│   ├── cutoff.py           # expected-profit approve/decline sweep
+│   └── pricing.py          # per-decile break-even APR + policy simulation
+├── tests/                  # 38 pytest cases: split, cutoff, pricing, leakage, evaluate
 └── reports/                # pipeline outputs (gitignored)
 ```
