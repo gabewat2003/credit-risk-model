@@ -1,0 +1,12 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${PGPASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-lending}
+    volumes:
+      - ./data/raw:/data
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+volumes:
+  pgdata:
