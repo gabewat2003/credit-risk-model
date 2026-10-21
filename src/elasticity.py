@@ -16,10 +16,14 @@ The cap at 1.0 enforces that lowering a rate can never add borrowers we did
 not observe — we only lose borrowers who walk when the rate rises. Default
 rate per decile is held constant (no adverse-selection modelling).
 
-Published elasticity for unsecured consumer credit (Karlan-Zinman 2008,
-Dehejia-Montgomery-Morduch 2012, DeFusco-Paciorek 2017) spans roughly
-β ∈ [-2, -8], centred near β = -4. Prime borrowers sit near -2, subprime
-near -6 to -8.
+There is no clean published β for US unsecured consumer-instalment lending
+that transfers directly to this population — the closest field evidence
+(Karlan-Zinman 2008, AER 98(3), on a South African consumer lender)
+reports steep demand responses without a point estimate the reader can
+port over, and most other cited work (e.g. DeFusco-Paciorek 2017) studies
+mortgages. β = -4 is used as an explicit midpoint assumption, with the
+grid β ∈ [-2, -8] bracketing the plausible range (prime/inelastic to
+deep-subprime/elastic).
 """
 
 from __future__ import annotations

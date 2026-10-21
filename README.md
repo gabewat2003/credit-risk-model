@@ -4,9 +4,9 @@ A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)**
 
 **Headline findings on 319k held-out test loans (2016-07+):**
 
-**Approve/decline.** At a model cutoff of PD ≤ 35.4%, the lender declines the riskiest 14% of applicants and lifts realized portfolio profit from $52.9M (approve everyone) to **$73.0M (+38%)** while trimming the default rate from 20.1% to 19.6%.
+**Approve/decline.** At a model cutoff of PD ≤ 36.0%, the lender declines the riskiest **13%** of applicants and lifts realized portfolio profit from $52.9M (approve everyone) to **$76.9M (+45%)** while trimming the realized default rate from **22.5%** on the full pool to **19.7%** inside the approved book.
 
-**Risk-based pricing with demand elasticity.** LendingClub under-prices its top risk deciles — decile 9 (PD ≈ 34%) and decile 10 (PD ≈ 43%) sit **at or below** actuarial break-even. Pricing each decile at `break_even_apr + 3%` lifts realized profit from $52.9M to **$143.5M at the midpoint demand elasticity** (β = −4, 62.6% of borrowers retained after the rate hike), with a sensitivity range of **+$58M to +$140M** across β ∈ [−6, −2]. [1]
+**Risk-based pricing with demand elasticity.** LendingClub under-prices its riskiest tiers — once an 85% LGD is baked into the break-even solver, actual APR sits **below** break-even across deciles **6, 7, 8, and 10** (the top decile by 2.4pp, actual APR 20.0% vs break-even 22.5%). Pricing each decile at `break_even_apr + 3%` lifts realized profit from $52.9M to **$143.5M at the midpoint demand-elasticity assumption** (β = −4, 62.6% of borrowers retained after the rate hike, i.e. 37.4% walk). Across β ∈ [−8, −2] the resulting profit **level** sits in **$90.1M–$192.0M** (uplift **+$37M to +$139M** vs the $52.9M approve-all baseline, i.e. **1.7× to 3.6×**). [1]
 
 [1] A no-churn upper bound (β = 0) is $266M, but it holds applicant behavior constant and ignores rate-elasticity of demand. The elastic numbers above are the honest range.
 
@@ -22,8 +22,8 @@ A probability-of-default (PD) model on **2.26M LendingClub loans (2007–2018)**
 | Model | AUC | KS | Brier |
 | --- | ---: | ---: | ---: |
 | Logistic Regression | 0.665 | 0.241 | 0.167 |
-| LightGBM (uncalibrated) | 0.670 | 0.245 | 0.165 |
-| **LightGBM (isotonic)** | **0.669** | **0.244** | **0.164** |
+| LightGBM (uncalibrated) | 0.670 | 0.246 | 0.165 |
+| **LightGBM (isotonic)** | **0.670** | **0.245** | **0.164** |
 
 ---
 
@@ -37,13 +37,13 @@ A good AUC is only useful once someone picks a cutoff and defends it. This proje
 
 | Item | Detail |
 | --- | --- |
-| Source | Kaggle, [Lending Club Loan Data](https://www.kaggle.com/datasets/wordsforthewise/lending-club) — `accepted_2007_to_2018Q4.csv` |
+| Source | Kaggle, [Lending Club Loan Data](https://www.kaggle.com/datasets/wordsforthewise/lending-club) — ship file `accepted_2007_to_2018Q4.csv.gz`, renamed on disk to `data/raw/loan.csv` (see `data/README.md`) |
 | Grain | One row per funded loan |
 | Raw size | 2,260,668 rows × 145 columns |
 | After filtering to resolved outcomes (`Fully Paid`/`Charged Off`) | 1,303,305 rows |
 | Target | `defaulted = 1` if `loan_status = 'Charged Off'`, else `0` |
 
-The Kaggle snapshot is privacy-scrubbed and does **not** carry `fico_range_low` / `fico_range_high`, so the model relies on self-reported borrower attributes, revolving-credit telemetry, and derived features such as credit-history length. Download instructions live in `data/README.md`; the raw CSV is gitignored.
+The Kaggle snapshot is privacy-scrubbed and does **not** carry `fico_range_low` / `fico_range_high` (verified against the file header: `head -1 data/raw/loan.csv | tr ',' '\n' | grep -i fico` returns nothing out of 145 columns). The model therefore relies on self-reported borrower attributes, revolving-credit telemetry, and derived features such as credit-history length, so it competes against LendingClub's underwriting without leaning on a bureau score. Download instructions live in `data/README.md`; the raw CSV is gitignored.
 
 ## 3. Pipeline
 
@@ -133,10 +133,10 @@ The exact amortized interest comes straight from the servicer-published `install
 
 | Policy | Approvals | Default rate | Expected profit | Realized profit |
 | --- | ---: | ---: | ---: | ---: |
-| Approve everyone | 319,376 | 20.1% | — | $52.9M |
-| **Model cutoff (PD ≤ 35.4%)** | **275,961** | **19.6%** | **$177.6M** | **$73.0M** |
+| Approve everyone | 319,376 (100.0%) | 22.5% | — | $52.9M |
+| **Model cutoff (PD ≤ 36.0%)** | **277,893 (87.0%)** | **19.7%** | **$175.7M** | **$76.9M** |
 
-The model declines the top-PD **~14%** of applicants, reducing the realized default rate by 0.5pp and lifting realized profit by **+38%** on the test window. The expected-profit figure sits above the realized figure because the LGD assumption (0.85) and the ignored prepayment effect both bias expectations high — the directional ranking of policies is what matters, not the absolute dollar level.
+The model declines the top-PD **~13%** of applicants, reducing the realized default rate by 2.8pp inside the approved book and lifting realized profit by **+45%** on the test window. The expected-profit figure sits above the realized figure because the LGD assumption (0.85) and the ignored prepayment effect both bias expectations high; the realized-profit column is what the policy comparison in this section relies on, and the LGD-sensitivity table in §6 bounds how far the realized number moves when the LGD assumption is wrong.
 
 ## 5. Risk-based pricing
 
@@ -156,20 +156,20 @@ The APR is recovered numerically with Brent's method against the standard amorti
 
 ### What LendingClub charged vs what break-even demands
 
-| Decile | Model PD | Actual default rate | LendingClub APR | Break-even APR | Proposed APR (+3% margin) |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 6.6% | 7.1% | 9.4% | 4.2% | 7.2% |
-| 2 | 10.1% | 11.4% | 11.0% | 6.9% | 9.9% |
-| 3 | 12.5% | 14.3% | 11.8% | 8.8% | 11.8% |
-| 4 | 15.1% | 17.4% | 12.5% | 10.7% | 13.7% |
-| 5 | 17.3% | 20.6% | 13.2% | 13.1% | 16.1% |
-| 6 | 20.0% | 23.3% | 13.9% | 14.8% | 17.8% |
-| 7 | 23.4% | 26.5% | 14.7% | 16.1% | 19.1% |
-| 8 | 28.0% | 29.9% | 15.8% | 16.8% | 19.8% |
-| 9 | 34.5% | 33.5% | 17.3% | 17.0% | 20.0% |
-| 10 | 48.1% | 42.8% | 20.0% | 22.1% | 25.1% |
+| Decile | Model PD | Actual default rate | LendingClub APR | Break-even APR | Proposed APR (+3% margin) | Priced vs BE |
+| ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 1 | 6.3% | 6.9% | 9.4% | 4.0% | 7.0% | above |
+| 2 | 10.4% | 11.5% | 11.0% | 7.0% | 10.0% | above |
+| 3 | 12.8% | 14.6% | 11.9% | 9.0% | 12.0% | above |
+| 4 | 15.1% | 17.3% | 12.5% | 10.7% | 13.7% | above |
+| 5 | 17.8% | 20.9% | 13.3% | 13.3% | 16.3% | ≈ at BE (+0.01pp) |
+| 6 | 20.4% | 23.5% | 14.0% | 14.6% | 17.6% | **below** |
+| 7 | 23.2% | 26.5% | 14.7% | 16.1% | 19.1% | **below** |
+| 8 | 27.8% | 30.0% | 15.8% | 16.9% | 19.9% | **below** |
+| 9 | 35.0% | 33.5% | 17.4% | 17.0% | 20.0% | above (+0.43pp) |
+| 10 | 48.4% | 43.2% | 20.0% | 22.5% | 25.5% | **below (−2.4pp)** |
 
-**The structural finding.** LendingClub's actual APR tracks the default rate roughly 1-for-1 across the deciles, which is close to zero expected margin before LGD is applied. Once a flat 85% loss-given-default is baked in, the break-even APR curve sits **above** the actual APR curve from decile 5 onward and crosses it hard at decile 10. On this test window, LendingClub priced the riskiest tier below break-even.
+**The structural finding.** LendingClub's actual APR tracks the default rate roughly 1-for-1 across the deciles, which is close to zero expected margin before LGD is applied. Once a flat 85% loss-given-default is baked in, the break-even APR curve rises **above** the actual APR curve across deciles **6, 7, 8** and crosses it hard at decile **10** (actual APR ≈ 20.0% vs break-even ≈ 22.5%, a 2.4pp shortfall). Deciles 5 and 9 are priced within a few basis points of break-even. On this test window, LendingClub priced the riskiest tier below break-even and the mid-risk tiers (6–8) at thin or negative actuarial margin.
 
 ### Portfolio uplift — before and after demand elasticity
 
@@ -190,7 +190,7 @@ The $266.1M figure is an upper bound. Real borrowers walk when offered a worse d
 | −6 | 52.6% | $111.5M | +$58.5M |
 | −8 *(subprime, elastic)* | 45.8% | $90.1M | +$37.2M |
 
-Published consumer-credit elasticities (Karlan–Zinman 2008; DeFusco–Paciorek 2017; others) cluster near **β = −4**, with prime segments around −2 and deep subprime up to −8. At the midpoint, the proposed pricing policy keeps **~63% of the original book** and lifts realized profit by **+$90.6M (+171%)** over LendingClub's actual rates. Across the full elasticity range the uplift stays **$37M–$140M** — in every case a 2× or better improvement, driven mainly by raising APR on the previously under-priced tails. The honest takeaway: the policy has to be viable even when 40% of your most rate-sensitive borrowers walk, and here it still is.
+There is no clean published elasticity for US unsecured consumer-instalment lending that transfers directly to LendingClub borrowers — Karlan–Zinman's AER 2008 field experiment ("Credit Elasticities in Less-Developed Economies") studies a South African consumer lender and reports "steep" demand responses to APR increases without a point estimate the reader can port over, and most other cited consumer-credit elasticity work (e.g. DeFusco–Paciorek 2017) studies mortgages at the conforming-loan limit. **β = −4 is therefore used here as an explicit assumption**, with β = −2 (prime/inelastic) and β = −8 (deep-subprime/elastic) bracketing the range. At the midpoint, the proposed pricing policy keeps **~63% of the original book** (so ~37% of the originally-approved borrowers walk when their rate rises) and lifts realized profit by **+$90.6M (+171%)** over LendingClub's actual rates. Across β ∈ [−8, −2] the uplift stays **+$37M to +$139M** — a **1.7× improvement** at β = −8 (where more than half the book walks) up to **3.6×** at β = −2 — driven mainly by raising APR on the previously under-priced tails. The honest takeaway: the policy survives across the full plausible elasticity range, and does so even when the walk-away rate is high.
 
 ## 6. LGD sensitivity
 
@@ -198,25 +198,25 @@ LGD is the single biggest unknown in the profit math. `src/sensitivity.py` re-so
 
 | LGD | Optimal cutoff PD | Approval rate | Realized profit |
 | ---: | ---: | ---: | ---: |
-| 0.70 | 43.6% | 93.7% | $220.2M |
-| 0.85 *(base case)* | 36.6% | 88.9% | $77.3M |
-| 1.00 | 20.2% | 58.6% | $5.0M |
+| 0.70 | 44.2% | 94.2% | $221.3M |
+| 0.85 *(base case)* | 36.0% | 87.0% | $76.9M |
+| 1.00 | 23.7% | 66.9% | **−$9.3M** |
 
-The model is highly LGD-sensitive. At LGD = 1.0 (zero recoveries) the optimal policy approves only ~59% of applicants — essentially deciles 1 through 5 — and the realized profit collapses to $5M. A production model would need its own LGD estimate; the recoveries carried through from the SQL layer suggest a realized LGD closer to 0.9, which is why the base case sits where it does.
+The model is highly LGD-sensitive. At LGD = 1.0 (zero recoveries) the optimal expected-profit cutoff produces a **realized loss** of ~$9M on the test window — but the trivial *decline-everyone* policy earns $0, so the sweep is picking a policy worse than doing nothing. The reason is a known bias in the expected-profit maximiser: `E[profit]` uses model PD and a flat LGD, while realized profit uses actual outcomes; when LGD = 1.0 inflates every default's loss, the test-set realized default rate turns out worse than the model expected inside the "approved" pool, so the optimum reported by the sweep is calibrated to expectations and not to the empirical distribution. The honest reading of the row is that **LGD = 1.0 is the breaking point for this policy family**: if recoveries really were zero, no fixed-threshold rule beats "decline everyone", and the lender's job becomes pricing or declining — not approving. In practice the `recoveries` column shipped in the LendingClub CSV suggests realized LGD closer to 0.85–0.90, which is why the base case sits where it does.
 
 ![sensitivity](reports/sensitivity.png)
 
 ## 7. Fair-lending audit
 
-Protected characteristics (race, sex, age) are not in the LendingClub data and must never enter the model. `src/fairness.py` audits three proxies routinely tested by compliance teams: `home_ownership`, `purpose`, and `addr_state`. For each group with ≥500 loans, it reports the approval rate under the operating cutoff (PD ≤ 35.4%), the realized default rate, and the **disparate-impact ratio** = group approval rate / reference approval rate. The four-fifths rule flags groups below 0.80.
+Protected characteristics (race, sex, age) are not in the LendingClub data and must never enter the model. `src/fairness.py` audits three proxies routinely tested by compliance teams: `home_ownership`, `purpose`, and `addr_state`. For each group with ≥500 loans, it reports the approval rate under the operating cutoff (PD ≤ 36.0%), the realized default rate, and the **disparate-impact ratio** = group approval rate / reference approval rate. The four-fifths rule flags groups below 0.80.
 
 | Column | Groups audited | Flagged | Worst group | Ratio |
 | --- | ---: | ---: | --- | ---: |
 | `home_ownership` | 3 | 0 | — | — |
 | `addr_state` | 49 | 0 | — | — |
-| `purpose` | 11 | **1** | `small_business` | **0.68** |
+| `purpose` | 11 | **1** | `small_business` | **0.69** |
 
-The `small_business` flag is real but defensible: that group's **actual default rate is 35.9%** on the test set, roughly double the base rate of 20.1%. The model is not inventing risk; it is responding to it. The compliance answer is to document the model's reliance on `purpose`, verify the feature does not proxy for a protected class, and consider **pricing the risk rather than declining it** — which is exactly the use case `src/pricing.py` was built for. Decile-level repricing lets small-business loans clear underwriting at a higher APR instead of being gated out.
+The `small_business` flag is real but defensible: that group's **actual default rate is 35.9%** on the test set, roughly 1.6× the full-pool base rate of 22.5%. The model is not inventing risk; it is responding to it. The compliance answer is to document the model's reliance on `purpose`, verify the feature does not proxy for a protected class, and consider **pricing the risk rather than declining it** — which is exactly the use case `src/pricing.py` was built for. Decile-level repricing lets small-business loans clear underwriting at a higher APR instead of being gated out.
 
 ![fairness-purpose](reports/fairness_purpose.png)
 
@@ -225,7 +225,8 @@ The `small_business` flag is real but defensible: that group's **actual default 
 - **Reject inference.** LendingClub only publishes funded loans, so the model never sees declined applicants. Population drift between funded and all applicants is unmeasured.
 - **No bureau score.** This Kaggle snapshot was privacy-scrubbed. A production model would have FICO; without it the ceiling on AUC is lower than for most published LendingClub analyses.
 - **Flat LGD assumption.** The headline numbers use LGD = 0.85; section 6 shows the full sensitivity.
-- **No prepayment or cost-of-funds modelling.** The profit math uses the scheduled amortization but assumes every non-defaulting loan runs to maturity and that funding is free.
+- **No prepayment or cost-of-funds modelling.** The profit math uses the scheduled amortization (`installment × term − principal`) and assumes every non-defaulting loan runs to maturity and that funding is free. The LendingClub CSV ships `total_pymnt` and `recoveries`, so an actual-cash P&L (`total_pymnt + recoveries − funded_amnt`) can be computed as a follow-up — **this would also verify whether the policy ranking (model-cutoff > approve-all) that the scheduled-interest math reports actually survives under cash accounting; the current numbers do not demonstrate that**, they only show it under the scheduled convention. Absolute dollar levels are optimistic.
+- **Right-censoring in the test window.** The pipeline keeps only loans whose outcome is `Fully Paid` or `Charged Off`, so loans issued late in 2016–2018 that were still current when the Kaggle snapshot was taken are excluded. This biases the resolved test cohort toward early payoffs and early charge-offs — late-vintage defaults that materialise after year 3 of a 60-month note are missing. A production backtest would weight by issue quarter and account for the still-current pool.
 - **No adverse-selection modelling.** The elasticity model drops a fixed fraction of borrowers at each decile when APRs rise. In reality the borrowers who stay are likely riskier than the ones who walk (adverse selection), which would raise the realized default rate inside the retained pool. The headline numbers do not adjust for this; a conditional-LGD + adverse-selection model is the natural follow-up.
 
 ## 9. AI-assisted development note
@@ -243,7 +244,7 @@ uv sync --extra dev
 docker compose up -d db
 # Place accepted_2007_to_2018Q4.csv at data/raw/loan.csv (see data/README.md).
 make all     # data -> features -> train -> evaluate -> cutoff
-make test    # 32 pytest cases
+make test    # 50 pytest cases
 ```
 
 Individual stages: `make data`, `make features`, `make train`, `make evaluate`, `make cutoff`, `make pricing`, `make elasticity`, `make sensitivity`, `make fairness`.
@@ -275,5 +276,7 @@ Individual stages: `make data`, `make features`, `make train`, `make evaluate`, 
 │   ├── sensitivity.py      # LGD sweep over cutoff + pricing
 │   └── fairness.py         # disparate-impact audit on protected proxies
 ├── tests/                  # 50 pytest cases across every module
-└── reports/                # pipeline outputs (gitignored)
+└── reports/                # pipeline outputs — PNG/CSV/md committed so the
+                            # README renders on GitHub; *.parquet and *.joblib
+                            # are gitignored (see .gitignore)
 ```

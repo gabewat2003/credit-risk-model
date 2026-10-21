@@ -11,7 +11,9 @@ proxies routinely tested by compliance teams for disparate impact:
 
 For each group this reports:
 
-1. Approval rate under the model cutoff (PD ≤ 35.4%).
+1. Approval rate under the operating cutoff — read from ``reports/cutoff_sweep.csv``
+   (the PD threshold that maximises expected profit on the test set), so the
+   audit always matches whatever ``src/cutoff.py`` currently chooses.
 2. Realized default rate (how the group actually performed).
 3. **Disparate-impact ratio** = group approval rate / reference-group approval rate.
    Under the "four-fifths rule" a ratio below 0.80 flags for review.
@@ -32,9 +34,26 @@ from src.config import REPORTS_DIR
 
 logger = logging.getLogger(__name__)
 
-CUTOFF_PD: float = 0.354  # the operating cutoff from src/cutoff.py (PD <= 35.4%)
 MIN_GROUP_SIZE: int = 500  # ignore sparse groups so ratios are not noise
 DISPARATE_IMPACT_FLOOR: float = 0.80  # four-fifths rule
+
+
+def _load_operating_cutoff() -> float:
+    """Pick the operating cutoff that `src/cutoff.py` wrote to disk.
+
+    Reads ``reports/cutoff_sweep.csv`` and returns the PD threshold that
+    maximises expected profit, so the fairness audit always matches the
+    cutoff reported in the README headline. Falls back to 0.36 if the
+    sweep file is missing (makes `pytest` on a fresh checkout still work).
+    """
+    sweep_path = REPORTS_DIR / "cutoff_sweep.csv"
+    if not sweep_path.exists():
+        return 0.36
+    sweep = pd.read_csv(sweep_path)
+    return float(sweep.loc[sweep["expected_profit"].idxmax(), "cutoff"])
+
+
+CUTOFF_PD: float = _load_operating_cutoff()
 
 
 def audit_group(

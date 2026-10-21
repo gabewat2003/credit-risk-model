@@ -1,4 +1,4 @@
 column,groups_audited,groups_flagged,min_ratio,worst_group
-home_ownership,3,0,0.9396501174303447,RENT
-purpose,11,1,0.6750502102818443,small_business
-addr_state,49,0,0.8473340816299152,MS
+home_ownership,3,0,0.938898564737072,RENT
+purpose,11,1,0.69061439438268,small_business
+addr_state,49,0,0.8308413649387861,ID
