@@ -136,6 +136,8 @@ The exact amortized interest comes straight from the servicer-published `install
 | Approve everyone | 319,376 (100.0%) | 22.5% | — | $52.9M |
 | **Model cutoff (PD ≤ 36.0%)** | **277,893 (87.0%)** | **19.7%** | **$175.7M** | **$76.9M** |
 
+The 22.5% figure is the test-set default rate computed on **all 319,376 loans**, including the ~0.7% high-risk tail with `pd_hat > 0.60` that lies outside the model's cutoff-sweep grid (grid caps at `CUTOFF_GRID_MAX = 0.60` in `src/config.py`). The sweep's last plotted row therefore shows a slightly lower default rate (~22.3%) than the true full-pool baseline, but the approve-all baseline in this table and in the elasticity sensitivity in §5 is computed on every row in the test parquet, so the numbers reconcile.
+
 The model declines the top-PD **~13%** of applicants, reducing the realized default rate by 2.8pp inside the approved book and lifting realized profit by **+45%** on the test window. The expected-profit figure sits above the realized figure because the LGD assumption (0.85) and the ignored prepayment effect both bias expectations high; the realized-profit column is what the policy comparison in this section relies on, and the LGD-sensitivity table in §6 bounds how far the realized number moves when the LGD assumption is wrong.
 
 ## 5. Risk-based pricing
